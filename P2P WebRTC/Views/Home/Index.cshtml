@@ -1,0 +1,135 @@
+﻿@{
+    ViewData["Title"] = "P2P Chat";
+}
+
+<h1>P2P Chat</h1>
+
+<div id="chat">
+    <!--Сообщения -->
+</div>
+<input type="text" id="messageInput" placeholder="Введите сообщение" />
+<button onclick="sendMessage()">Отправить</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.5/signalr.min.js"></script>
+<script>
+    let connection = new signalR.HubConnectionBuilder()
+        .withUrl("/signaling")
+        .build();
+
+    let peerConnection;
+    let dataChannel;
+
+    // ICE серверы, можно использовать публичные STUN сервера
+    const configuration = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+        ]
+    };
+
+    let myConnectionId = null;
+    let remoteConnectionId = null;
+
+    // Подключение к серверу сигнализации
+    connection.start().then(() => {
+        console.log("Connected to signaling server");
+        connection.invoke("GetConnectionId").then(function (connectionId) {
+            myConnectionId = connectionId;
+            startConnection();
+        });
+    }).catch(err => console.error(err));
+    // Сервер должен предоставить метод для получения ConnectionId в SignalingHub GetConnectionId() => Context.ConnectionId;
+
+    // Обработчик получения предложения
+    connection.on("ReceiveOffer", async (callerConnectionId, sdp) => {
+        remoteConnectionId = callerConnectionId;
+        peerConnection = createPeerConnection();
+
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(sdp)));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await connection.invoke("SendAnswer", remoteConnectionId, JSON.stringify(peerConnection.localDescription));
+    });
+
+    // Обработчик получения ответа
+    connection.on("ReceiveAnswer", async (receiverConnectionId, sdp) => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(JSON.parse(sdp)));
+    });
+
+    // Обработчик получения ICE кандидата
+    connection.on("ReceiveIceCandidate", async (senderConnectionId, candidate) => {
+        try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(candidate)));
+        } catch (e) {
+            console.error('Error adding received ice candidate', e);
+        }
+    });
+
+    // Создание RTCPeerConnection и обработка событий
+    function createPeerConnection() {
+        const pc = new RTCPeerConnection(configuration);
+
+        pc.onicecandidate = event => {
+
+            if (event.candidate) {
+                connection.invoke("SendIceCandidate", remoteConnectionId, JSON.stringify(event.candidate));
+            }
+        };
+
+        // Обработчик DataChannel
+        pc.ondatachannel = event => {
+            dataChannel = event.channel;
+            setupDataChannel();
+        };
+
+        pc.onconnectionstatechange = () => {
+            console.log('Connection state: ' + pc.connectionState);
+        };
+
+        return pc;
+    }
+
+    // Установка DataChannel для обмена сообщениями
+    function setupDataChannel() {
+        dataChannel.onopen = () => {
+            console.log("Data channel is open");
+        };
+
+        dataChannel.onmessage = event => {
+            const chat = document.getElementById("chat");
+            const messageElement = document.createElement("div");
+            messageElement.textContent = `Клиент 2: ${event.data}`;
+            chat.appendChild(messageElement);
+        };
+    }
+
+    // Функция для инициации соединения
+    async function startConnection() {
+        console.log("Start connection");
+        peerConnection = createPeerConnection();
+        dataChannel = peerConnection.createDataChannel("chat");
+        setupDataChannel();
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        await connection.invoke("SendOffer", null, JSON.stringify(peerConnection.localDescription));
+    }
+
+    // Отправка сообщения через DataChannel
+    function sendMessage() {
+        console.log("Send message")
+        const messageInput = document.getElementById("messageInput");
+        const message = messageInput.value;
+
+        console.log(dataChannel.readyState);
+
+        dataChannel.send(message);
+
+        const chat = document.getElementById("chat");
+        const messageElement = document.createElement("div");
+        messageElement.textContent = `Клиент 1: ${message}`;
+        chat.appendChild(messageElement);
+
+        messageInput.value = '';
+    }
+</script>
